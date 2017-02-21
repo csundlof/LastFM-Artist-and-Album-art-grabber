@@ -7,7 +7,9 @@ import java.net.*;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
-import java.util.Stack;
+import java.util.LinkedList;
+import java.util.Map;
+import java.util.Queue;
 
 import javax.imageio.ImageIO;
 import java.util.concurrent.locks.Lock;
@@ -23,13 +25,18 @@ import org.xml.sax.helpers.DefaultHandler;
 public class Main extends Thread {
 
 	private static final String host = "http://ws.audioscrobbler.com/2.0/", API_KEY = "1467cbdbeb8e49fab49312b7e236944a";
-	private static Stack<File> folders = new Stack<File>();
-	private final static int NUMWORKERS = Runtime.getRuntime().availableProcessors();
-	private final Lock _mutex = new ReentrantLock(true);
+	private static Queue<File> folders = new LinkedList<File>();
+	private static int NUMWORKERS = Runtime.getRuntime().availableProcessors() * 2;
+	private static final Lock _mutex = new ReentrantLock(true);
 	private final Lock artistLock = new ReentrantLock(true), albumLock = new ReentrantLock(true), artistListLock = new ReentrantLock(true);
+	private final Lock foldersLock = new ReentrantLock(true);
 	private static int artistsDownloaded = 0;
 	private static int albumsDownloaded = 0;
 	private HashMap<String, Image> artistImages = new HashMap<String, Image>(); //store already downloaded images 
+	private static HashMap<String,Integer> problematicFolders = new HashMap<String,Integer>();
+	private final String autocorrect = "autocorrect=1";
+	private static final String API_STRING = "&api_key=" + API_KEY;
+	private static boolean thorough = true;
 
 	private FilenameFilter filter2 = (dir, name) -> {
 		String lowercaseName = name.toLowerCase();
@@ -39,7 +46,7 @@ public class Main extends Thread {
 			return false;
 		}
 	};
-	
+
 	private FilenameFilter filter = (dir, name) -> {
 		String lowercaseName = name.toLowerCase();
 		if (lowercaseName.matches("(.+mp3)|(.+flac)|(.+m4a)")) {
@@ -48,26 +55,47 @@ public class Main extends Thread {
 			return false;
 		}
 	};
-	
+
+	/**
+	 * Arguments should be full paths to folders to search OR the flag -f, indicating that the program should be "sloppy", but fast. -f will make the program 
+	 * search less extensively, and possibly resulting in fewer pictures being found.
+	 * @param args Folders to search recursively. Make sure to use " " to encapsulate paths if they contain spaces.
+	 */
 	public static void main(String[] args) {
 		String path = "";
+		_mutex.lock();
 		if(args.length == 0){
 			Path currentRelativePath = Paths.get("");
 			String s = currentRelativePath.toAbsolutePath().toString();
 			path = s;
+			File[] directories = new File(path).listFiles(File::isDirectory);
+			for(File f : directories)
+			{
+				folders.add(f);
+			}
 		}
 		else{
-			path = args[0];
-			for(int i = 1; i < args.length; ++i)
-				path = path + " " + args[i];
+			for(String s : args){
+				if(s.equals("-f"))
+					thorough = false;
+				else{
+				path = s;
+				System.out.println("Root folder: " + path);
+				File[] directories = new File(path).listFiles(File::isDirectory);
+				for(File f : directories)
+				{
+					folders.add(f);
+				}
+				NUMWORKERS += Runtime.getRuntime().availableProcessors(); // more hard drives means we need more threads if we want to make good use of the I/O speed.
+				}
+			}
 		}
-		System.out.println("Root folder: " + path);
+		_mutex.unlock();
+		if(NUMWORKERS > Runtime.getRuntime().availableProcessors() * 4) // let's not use TOO many threads..
+			NUMWORKERS = Runtime.getRuntime().availableProcessors() * 4;
 		System.out.println("Program will run using " + NUMWORKERS + " threads");
-		File[] directories = new File(path).listFiles(File::isDirectory);
-		for(File f : directories)
-		{
-			folders.push(f);
-		}
+		System.out.println(thorough == true ? "Fast mode is NOT enabled. Runtime will be longer, but more pictures should be found." : "Fast mode is enabled. Some pictures may not be found.");
+		long time = System.currentTimeMillis();
 		Thread threads[] = new Thread[NUMWORKERS];
 		for(int i = 0; i < NUMWORKERS; ++i){
 			threads[i] = new Thread(new Main());
@@ -76,11 +104,16 @@ public class Main extends Thread {
 		for(int i = 0; i < threads.length; ++i)
 			try {
 				threads[i].join();
-			} catch (InterruptedException e) {
-				// TODO Auto-generated catch block
-				e.printStackTrace();
-			}
+			} catch (InterruptedException e) {}
 		System.out.println("Downloaded:\n" + artistsDownloaded + " artist pictures.\n" + albumsDownloaded + " album covers.");
+		System.out.println("Total time elapsed: " + ((float)(System.currentTimeMillis() - time)/1000) + " seconds");
+		if(problematicFolders.size() > 0)
+			System.out.println("Issues downloading in the following folders(" + problematicFolders.size() + "): ");
+		for(Map.Entry<String, Integer> entry : problematicFolders.entrySet())
+		{
+			System.out.println(entry.getKey() + ", tried " + entry.getValue() + " times.");
+		}
+
 	}
 
 	/**
@@ -88,17 +121,22 @@ public class Main extends Thread {
 	 */
 	public void run() {
 		Long id = this.getId();
-		System.out.println(id + " started.");
-		while(folders.size()>0){
+		System.out.println("Thread " + id + " started.");
+		while(!folders.isEmpty()){
+			File folder = null;
 			_mutex.lock();
-			if(folders.size()==0){
+			if(folders.isEmpty()){
 				_mutex.unlock();
 				break;
 			}
-			File folder = folders.pop(); // grab work from bag of tasks
+			//if(folders.size() > 0)
+			folder = folders.remove(); // grab work from bag of tasks
 			_mutex.unlock();
-			downloadImages(folder, id);
-			System.out.println(folders.size() + " folders remaining.");
+			if(folder != null){
+				if(folders.size()%10 == 0)
+					System.out.println(folders.size() + " folders remaining.");
+				downloadImages(folder, id);
+			}
 		}
 		System.out.println(id + " finished.");
 	}
@@ -112,12 +150,12 @@ public class Main extends Thread {
 	private void downloadImages(File folder, long id) {
 		//System.out.println("hey, I'm looking at " + folder.getName() + ". t. " + id);
 		File[] directories = folder.listFiles(File::isDirectory);
-		if(directories.length > NUMWORKERS*2) // this folder has many subfolders, let's split the work up.
+		if(directories.length >= Runtime.getRuntime().availableProcessors()) // this folder has many subfolders, let's split the work up.
 		{
 			_mutex.lock();
 			for(File f : directories)
 			{
-				folders.push(f);
+				folders.add(f);
 			}
 			_mutex.unlock();
 			System.out.println("Added " + directories.length + " folders to bag of tasks.");
@@ -131,13 +169,19 @@ public class Main extends Thread {
 		boolean art = false, alb = false;
 		for(File f : folder.listFiles(filter2))
 		{
-			if(f.getName().startsWith("artist")){
+			if(f.getName().toLowerCase().startsWith("artist")){
 				art = true;
 			}
-			else if(f.getName().startsWith("cover"))
+			else if(f.getName().toLowerCase().startsWith("cover"))
 				alb = true;
 		}
+		if(alb && art)
+		{
+			return;
+		}
 		File[] files = folder.listFiles(filter);
+		String lastart = "";
+		String lastalbum = "";
 		try{
 			for(File f: files)
 			{
@@ -146,10 +190,10 @@ public class Main extends Thread {
 				ContentHandler handler = new DefaultHandler();
 				Metadata metadata = new Metadata();
 				Parser parser = null;
-				if(f.getName().endsWith("mp3")){
+				if(f.getName().toLowerCase().endsWith("mp3")){
 					parser = new Mp3Parser();
 				}
-				else if(f.getName().endsWith("flac")){
+				else if(f.getName().toLowerCase().endsWith("flac")){
 					parser = new FlacParser();
 				}
 				else{
@@ -158,46 +202,31 @@ public class Main extends Thread {
 				ParseContext parseCtx = new ParseContext();
 				parser.parse(binput, handler, metadata, parseCtx);
 				input.close();
+				/**
+		        // List all metadata
+		        String[] metadataNames = metadata.names();
 
-				String autocorrect = "autocorrect=1";
+		        for(String name : metadataNames){
+		        System.out.println(name + ": " + metadata.get(name));
+		        }
+				 */
 				String artist = metadata.get("xmpDM:artist");
 				String artarg = "artist=" + artist;
-				String albarg = "album=" + metadata.get("xmpDM:album");
-				if(!art)
+				//System.out.println(artarg);
+				if(!art && !artist.equals(lastart)) //if we couldn't find art for the artist last time, we won't be able to this time either. Check if next track is of a different artist instead!
 				{
-					boolean saved = false;
-					if(artistImages.containsKey(artist)) 
-					{
-						System.out.println("SAVED BANDWIDTH !!");
-						File pic = new File(f.getParent() + "/artist.png");
-						ImageIO.write((RenderedImage) artistImages.get(artist), "png", pic);
-						saved = true;
-					}
-					if(!saved){
-						File pic = new File(f.getParent() + "/artist.png");
-						Image res = getImage("artist.getInfo",artarg, autocorrect);
-						if(res!=null){
-							ImageIO.write((RenderedImage) res, "png", pic);
-							artistListLock.lock();
-							artistImages.put(artist, res); // this should save quite a lot of bandwidth(and time) when multiple albums of the same artist exist.
-							artistListLock.unlock();
-							artistLock.lock();
-							artistsDownloaded++;
-							artistLock.unlock();
-						}
-					}
+					lastart = artist;
+					art = getArtistArt(artist, artarg, folder, f);
 				}
 				if(!alb)
 				{
-					File pic = new File(f.getParent() + "/cover.png");
-					Image res = getImage("album.getInfo",artarg, albarg, autocorrect);
-					if(res!=null){
-						ImageIO.write((RenderedImage) res, "png", pic);
-						albumLock.lock();
-						albumsDownloaded++;
-						albumLock.unlock();
-					}
+					String album = "album=" + metadata.get("xmpDM:album");
+					String track = "track=" + metadata.get("dc:title");
+					alb = getAlbumArt(artist, artarg, folder, f, album, lastalbum, track);
+					lastalbum = album;
 				}
+				if(thorough && (!alb || !art)) //if art could not be found with data from the first track, try other tracks in the folder.. useful when tags are wonky
+						continue;
 				break;
 			}
 		}
@@ -207,9 +236,111 @@ public class Main extends Thread {
 	}
 
 	/**
+	 * Downloads and saves album art if album art is found on last.fm. First checks if art can be found by getting the track's info(based on name and artist). 
+	 * If that fails, tries to download art by using the tagged album name.
+	 * @param artist
+	 * @param artarg
+	 * @param autocorrect
+	 * @param folder
+	 * @param f
+	 * @param album
+	 * @param lastalbum
+	 * @param track
+	 * @return
+	 */
+	private boolean getAlbumArt(String artist, String artarg, File folder, File f, String album, String lastalbum, String track) throws Exception
+	{
+		boolean alb = false;
+		File pic = new File(f.getParent() + "/cover.png");
+		Image res = getImage("track.getInfo",track, artarg, autocorrect);
+		if(res!=null){
+			ImageIO.write((RenderedImage) res, "png", pic);
+			albumLock.lock();
+			albumsDownloaded++;
+			albumLock.unlock();
+			alb = true;
+		}
+		else
+		{
+			if(!album.equals(lastalbum))
+			{
+				res = getImage("album.getInfo",artarg, album, autocorrect);
+				if(res!=null){
+					ImageIO.write((RenderedImage) res, "png", pic);
+					albumLock.lock();
+					albumsDownloaded++;
+					albumLock.unlock();
+					alb = true;
+				}
+				if(!alb){
+					foldersLock.lock();
+					Integer t = problematicFolders.get(folder.getAbsolutePath());
+					if(t == null)
+						t = 1;
+					else
+						t++;
+					problematicFolders.put(folder.getAbsolutePath(),t);
+					foldersLock.unlock();
+				}
+			}
+		}
+		return alb;
+
+	}
+
+	/**
+	 * Downloads and saves artist art if art exists on last.fm. Tries to avoid downloading the same image twice by saving it locally and checking if image is saved before downloading.
+	 * @param artist
+	 * @param artarg
+	 * @param autocorrect
+	 * @param folder
+	 * @param f
+	 * @return
+	 */
+	private boolean getArtistArt(String artist, String artarg, File folder, File f) throws Exception
+	{
+		boolean saved = false;
+		boolean art = false;
+		if(artistImages.containsKey(artist)) 
+		{
+			System.out.println("SAVED BANDWIDTH !!");
+			File pic = new File(f.getParent() + "/artist.png");
+			ImageIO.write((RenderedImage) artistImages.get(artist), "png", pic);
+			saved = true;
+			art = true;
+		}
+		if(!saved){
+			File pic = new File(f.getParent() + "/artist.png");
+			Image res = getImage("artist.getInfo",artarg, autocorrect);
+			if(res!=null){
+				ImageIO.write((RenderedImage) res, "png", pic);
+				artistListLock.lock();
+				artistImages.put(artist, res); // this should save quite a lot of bandwidth(and time) when multiple albums of the same artist exist.
+				artistListLock.unlock();
+				artistLock.lock();
+				artistsDownloaded++;
+				artistLock.unlock();
+				art = true;
+			}
+			if(!art)
+			{
+				foldersLock.lock();
+				Integer t = problematicFolders.get(folder.getAbsolutePath());
+				if(t == null)
+					t = 1;
+				else
+					t++;
+				problematicFolders.put(folder.getAbsolutePath(),t);
+				foldersLock.unlock();
+			}
+		}
+		return art;
+	}
+
+	/**
 	 * Downloads image from last.fm API.
 	 * @param method
-	 * @param params eventual parameters needed for the GET request.
+	 * @param params Parameters needed for the GET request.
 	 * @return Image
 	 * @throws Exception
 	 */
@@ -219,20 +350,30 @@ public class Main extends Thread {
 		urlToRead.append(host);
 		urlToRead.append("?");
 		urlToRead.append("method=" + method);
-		urlToRead.append("&api_key=" + API_KEY);
+		urlToRead.append(API_STRING);
 		for(String param : params)
 		{
 			urlToRead.append("&");
 			urlToRead.append(param);
 		}
+		//System.out.println(urlToRead);
 		URL url = new URL(urlToRead.toString());
 		HttpURLConnection conn = (HttpURLConnection) url.openConnection();
 		conn.setRequestMethod("GET");
 		BufferedReader rd = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
 		String line;
-		while ((line = rd.readLine()) != null) {
-			if(line.startsWith("<image size=\"mega")){
-				line = line.substring(19, line.length()-8);
+		String imgUrl = "";
+		while ((line = rd.readLine()) != null) { // grab largest picture available
+			if(line.startsWith("<image size=\"small"))
+				imgUrl = line.substring(20, line.length()-8);
+			else if(line.startsWith("<image size=\"medium"))
+				imgUrl = line.substring(21, line.length()-8);
+			else if(line.startsWith("<image size=\"large"))
+				imgUrl = line.substring(20, line.length()-8);
+			else if(line.startsWith("<image size=\"extralarge"))
+				imgUrl = line.substring(25, line.length()-8);
+			else if(line.startsWith("<image size=\"mega")){
+				imgUrl = line.substring(19, line.length()-8);
 				break;
 			}
 			//result.append(line);
@@ -241,7 +382,7 @@ public class Main extends Thread {
 		//System.out.println(result);
 		Image image = null;
 		try{
-			image = ImageIO.read(new URL(line));  
+			image = ImageIO.read(new URL(imgUrl));  
 		}
 		catch(Exception e){}
 		return image;
