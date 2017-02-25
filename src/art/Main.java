@@ -29,7 +29,6 @@ public class Main extends Thread {
 	private static int NUMWORKERS = Runtime.getRuntime().availableProcessors() * 2;
 	private static final Lock _mutex = new ReentrantLock(true);
 	private final Lock artistLock = new ReentrantLock(true), albumLock = new ReentrantLock(true), artistListLock = new ReentrantLock(true);
-	private final Lock foldersLock = new ReentrantLock(true);
 	private static int artistsDownloaded = 0;
 	private static int albumsDownloaded = 0;
 	private HashMap<String, Image> artistImages = new HashMap<String, Image>(); //store already downloaded images 
@@ -63,36 +62,26 @@ public class Main extends Thread {
 	 */
 	public static void main(String[] args) {
 		String path = "";
-		_mutex.lock();
 		if(args.length == 0){
 			Path currentRelativePath = Paths.get("");
 			String s = currentRelativePath.toAbsolutePath().toString();
 			path = s;
-			File[] directories = new File(path).listFiles(File::isDirectory);
-			for(File f : directories)
-			{
-				folders.add(f);
-			}
+			new Main().traverseFolder(new File(path), -1, true);
 		}
 		else{
 			for(String s : args){
 				if(s.equals("-f"))
 					thorough = false;
 				else{
-				path = s;
-				System.out.println("Root folder: " + path);
-				File[] directories = new File(path).listFiles(File::isDirectory);
-				for(File f : directories)
-				{
-					folders.add(f);
-				}
-				NUMWORKERS += Runtime.getRuntime().availableProcessors(); // more hard drives means we need more threads if we want to make good use of the I/O speed.
+					path = s;
+					System.out.println("Root folder: " + path);
+					new Main().traverseFolder(new File(path), -1, true);
+					NUMWORKERS += Runtime.getRuntime().availableProcessors(); // more hard drives means we need more threads if we want to make good use of the I/O speed.
 				}
 			}
 		}
-		_mutex.unlock();
-		if(NUMWORKERS > Runtime.getRuntime().availableProcessors() * 4) // let's not use TOO many threads..
-			NUMWORKERS = Runtime.getRuntime().availableProcessors() * 4;
+		if(NUMWORKERS > Runtime.getRuntime().availableProcessors() * 5) // let's not use TOO many threads..
+			NUMWORKERS = Runtime.getRuntime().availableProcessors() * 5;
 		System.out.println("Program will run using " + NUMWORKERS + " threads");
 		System.out.println(thorough == true ? "Fast mode is NOT enabled. Runtime will be longer, but more pictures should be found." : "Fast mode is enabled. Some pictures may not be found.");
 		long time = System.currentTimeMillis();
@@ -111,7 +100,7 @@ public class Main extends Thread {
 			System.out.println("Issues downloading in the following folders(" + problematicFolders.size() + "): ");
 		for(Map.Entry<String, Integer> entry : problematicFolders.entrySet())
 		{
-			System.out.println(entry.getKey() + ", tried " + entry.getValue() + " times.");
+			System.out.println(entry.getKey() + ", tried " + entry.getValue() + (entry.getValue() > 1 ? " times":" time"));
 		}
 
 	}
@@ -135,22 +124,17 @@ public class Main extends Thread {
 			if(folder != null){
 				if(folders.size()%10 == 0)
 					System.out.println(folders.size() + " folders remaining.");
-				downloadImages(folder, id);
+				traverseFolder(folder, id, false);
 			}
 		}
 		System.out.println(id + " finished.");
 	}
 
-	/**
-	 * Searches deep until no more folders are found. Downloads images belonging to any songs regardless of their level.
-	 * If there are too many folders in the folder, they are added to the bag of task and the recursion is interrupted.
-	 * @param folder
-	 * @param id
-	 */
-	private void downloadImages(File folder, long id) {
+	private void traverseFolder(File folder, long id, boolean once)
+	{
 		//System.out.println("hey, I'm looking at " + folder.getName() + ". t. " + id);
 		File[] directories = folder.listFiles(File::isDirectory);
-		if(directories.length >= Runtime.getRuntime().availableProcessors()) // this folder has many subfolders, let's split the work up.
+		if(directories.length >= Runtime.getRuntime().availableProcessors() || once) // this folder has many subfolders, let's split the work up.
 		{
 			_mutex.lock();
 			for(File f : directories)
@@ -163,9 +147,19 @@ public class Main extends Thread {
 		else{
 			for(File f : directories)
 			{
-				downloadImages(f, id);
+				traverseFolder(f, id, false);
 			}
 		}
+		downloadImages(folder, id);
+	}
+
+	/**
+	 * Searches deep until no more folders are found. Downloads images belonging to any songs regardless of their level.
+	 * If there are too many folders in the folder, they are added to the bag of task and the recursion is interrupted.
+	 * @param folder
+	 * @param id
+	 */
+	private void downloadImages(File folder, long id) {
 		boolean art = false, alb = false;
 		for(File f : folder.listFiles(filter2))
 		{
@@ -212,21 +206,26 @@ public class Main extends Thread {
 				 */
 				String artist = metadata.get("xmpDM:artist");
 				String artarg = "artist=" + artist;
+				String track = "track=" + metadata.get("dc:title");
 				//System.out.println(artarg);
-				if(!art && !artist.equals(lastart)) //if we couldn't find art for the artist last time, we won't be able to this time either. Check if next track is of a different artist instead!
-				{
-					lastart = artist;
-					art = getArtistArt(artist, artarg, folder, f);
+				try{
+					if(!art && !artist.equals(lastart)) //if we couldn't find art for the artist last time, we won't be able to this time either. Check if next track is of a different artist instead!
+					{
+						lastart = artist;
+						art = getArtistArt(artist, artarg, track, folder, f);
+					}
+					if(!alb)
+					{
+						String album = "album=" + metadata.get("xmpDM:album");
+						alb = getAlbumArt(artist, artarg, folder, f, album, lastalbum, track);
+						lastalbum = album;
+					}
 				}
-				if(!alb)
-				{
-					String album = "album=" + metadata.get("xmpDM:album");
-					String track = "track=" + metadata.get("dc:title");
-					alb = getAlbumArt(artist, artarg, folder, f, album, lastalbum, track);
-					lastalbum = album;
+				catch(Exception e){lastart = ""; lastalbum = ""; addProblematic(folder); 
+				//e.printStackTrace();
 				}
 				if(thorough && (!alb || !art)) //if art could not be found with data from the first track, try other tracks in the folder.. useful when tags are wonky
-						continue;
+					continue;
 				break;
 			}
 		}
@@ -252,7 +251,11 @@ public class Main extends Thread {
 	{
 		boolean alb = false;
 		File pic = new File(f.getParent() + "/cover.png");
-		Image res = getImage("track.getInfo",track, artarg, autocorrect);
+		Image res = null;
+		try{
+		res = getImage("track.getInfo",track, artarg, autocorrect);
+		}
+		catch(Exception e){}
 		if(res!=null){
 			ImageIO.write((RenderedImage) res, "png", pic);
 			albumLock.lock();
@@ -272,16 +275,9 @@ public class Main extends Thread {
 					albumLock.unlock();
 					alb = true;
 				}
-				if(!alb){
-					foldersLock.lock();
-					Integer t = problematicFolders.get(folder.getAbsolutePath());
-					if(t == null)
-						t = 1;
-					else
-						t++;
-					problematicFolders.put(folder.getAbsolutePath(),t);
-					foldersLock.unlock();
-				}
+			}
+			if(!alb){
+				addProblematic(folder);
 			}
 		}
 		return alb;
@@ -292,12 +288,12 @@ public class Main extends Thread {
 	 * Downloads and saves artist art if art exists on last.fm. Tries to avoid downloading the same image twice by saving it locally and checking if image is saved before downloading.
 	 * @param artist
 	 * @param artarg
-	 * @param autocorrect
+	 * @param track
 	 * @param folder
 	 * @param f
 	 * @return
 	 */
-	private boolean getArtistArt(String artist, String artarg, File folder, File f) throws Exception
+	private boolean getArtistArt(String artist, String artarg, String track, File folder, File f) throws Exception
 	{
 		boolean saved = false;
 		boolean art = false;
@@ -311,7 +307,27 @@ public class Main extends Thread {
 		}
 		if(!saved){
 			File pic = new File(f.getParent() + "/artist.png");
-			Image res = getImage("artist.getInfo",artarg, autocorrect);
+			Image res = null;
+			try{
+				res = getImage("artist.getInfo",artarg, autocorrect);
+			}
+			catch(Exception e){ 
+				artarg = "artist=";
+				try{
+					artarg +=  getArtist(track);
+				}
+				catch(Exception ee)
+				{
+				}
+				finally{
+					if(artarg.equals("artist="))
+					{
+						addProblematic(folder);
+						return false;
+					}
+				}
+				res = getImage("artist.getInfo",artarg, autocorrect);
+			}
 			if(res!=null){
 				ImageIO.write((RenderedImage) res, "png", pic);
 				artistListLock.lock();
@@ -324,17 +340,54 @@ public class Main extends Thread {
 			}
 			if(!art)
 			{
-				foldersLock.lock();
-				Integer t = problematicFolders.get(folder.getAbsolutePath());
-				if(t == null)
-					t = 1;
-				else
-					t++;
-				problematicFolders.put(folder.getAbsolutePath(),t);
-				foldersLock.unlock();
+				addProblematic(folder);
 			}
 		}
 		return art;
+	}
+
+	/**
+	 * Returns artist for a track. If one is associated with the track on last.fm.
+	 * @param track
+	 * @return
+	 * @throws Exception
+	 */
+	private String getArtist(String track) throws Exception {
+		StringBuilder urlToRead = new StringBuilder();
+		urlToRead.append(host);
+		urlToRead.append("?");
+		urlToRead.append("method=track.getinfo");
+		urlToRead.append(API_STRING);
+		urlToRead.append("&");
+		urlToRead.append(track);
+		//System.out.println(urlToRead);
+		URL url = new URL(urlToRead.toString());
+		HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+		conn.setRequestMethod("GET");
+		BufferedReader rd = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
+		String line;
+		while ((line = rd.readLine()) != null) { //get name of artist, if one exists.
+			if(line.startsWith("<artist>"))
+			{
+				line = rd.readLine();
+				return line.substring(6, (line.length()-7));
+			}
+		}
+		return "";
+	}
+
+	/**
+	 * add folder to problematicFolders list.
+	 * @param folder
+	 */
+	private synchronized void addProblematic(File folder)
+	{
+		Integer t = problematicFolders.get(folder.getAbsolutePath());
+		if(t == null)
+			t = 1;
+		else
+			t++;
+		problematicFolders.put(folder.getAbsolutePath(),t);
 	}
 
 	/**
