@@ -17,6 +17,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.parser.Parser;
+import org.apache.tika.parser.audio.AudioParser;
 import org.apache.tika.parser.mp3.Mp3Parser;
 import org.apache.tika.parser.mp4.MP4Parser;
 import org.gagravarr.tika.FlacParser;
@@ -26,7 +27,7 @@ public class Main extends Thread {
 
 	private static final String host = "http://ws.audioscrobbler.com/2.0/", API_KEY = "1467cbdbeb8e49fab49312b7e236944a";
 	private static Queue<File> folders = new LinkedList<File>();
-	private static int NUMWORKERS = Runtime.getRuntime().availableProcessors() * 2;
+	private static int NUMWORKERS = Runtime.getRuntime().availableProcessors();
 	private static final Lock _mutex = new ReentrantLock(true);
 	private final Lock artistLock = new ReentrantLock(true), albumLock = new ReentrantLock(true), artistListLock = new ReentrantLock(true);
 	private static int artistsDownloaded = 0;
@@ -48,7 +49,7 @@ public class Main extends Thread {
 
 	private FilenameFilter filter = (dir, name) -> {
 		String lowercaseName = name.toLowerCase();
-		if (lowercaseName.matches("(.+mp3)|(.+flac)|(.+m4a)")) {
+		if (lowercaseName.matches("(.+mp3)|(.+flac)|(.+wav)|(.+m4a)")) {
 			return true;
 		} else {
 			return false;
@@ -76,12 +77,12 @@ public class Main extends Thread {
 					path = s;
 					System.out.println("Root folder: " + path);
 					new Main().traverseFolder(new File(path), -1, true);
-					NUMWORKERS += Runtime.getRuntime().availableProcessors(); // more hard drives means we need more threads if we want to make good use of the I/O speed.
+					NUMWORKERS += 2*Runtime.getRuntime().availableProcessors(); // more hard drives means we need more threads if we want to make good use of the I/O speed.
 				}
 			}
 		}
-		if(NUMWORKERS > Runtime.getRuntime().availableProcessors() * 5) // let's not use TOO many threads..
-			NUMWORKERS = Runtime.getRuntime().availableProcessors() * 5;
+		if(NUMWORKERS > Runtime.getRuntime().availableProcessors() * 9) // let's not use TOO many threads..
+			NUMWORKERS = Runtime.getRuntime().availableProcessors() * 9;
 		System.out.println("Program will run using " + NUMWORKERS + " threads");
 		System.out.println(thorough == true ? "Fast mode is NOT enabled. Runtime will be longer, but more pictures should be found." : "Fast mode is enabled. Some pictures may not be found.");
 		long time = System.currentTimeMillis();
@@ -118,7 +119,7 @@ public class Main extends Thread {
 				_mutex.unlock();
 				break;
 			}
-			//if(folders.size() > 0)
+			//if(folders.size() > NUMWORKERS * 5)
 			folder = folders.remove(); // grab work from bag of tasks
 			_mutex.unlock();
 			if(folder != null){
@@ -130,6 +131,14 @@ public class Main extends Thread {
 		System.out.println(id + " finished.");
 	}
 
+	/**
+	 * Searches deep until no more folders are found. Downloads images belonging to any songs regardless of their level.
+	 * If there are too many folders in the folder, they are added to the bag of task and the recursion is interrupted.
+	 * Recursion also never happens if once is set to true.
+	 * @param folder
+	 * @param id
+	 * @param once
+	 */
 	private void traverseFolder(File folder, long id, boolean once)
 	{
 		//System.out.println("hey, I'm looking at " + folder.getName() + ". t. " + id);
@@ -154,8 +163,7 @@ public class Main extends Thread {
 	}
 
 	/**
-	 * Searches deep until no more folders are found. Downloads images belonging to any songs regardless of their level.
-	 * If there are too many folders in the folder, they are added to the bag of task and the recursion is interrupted.
+	 * Downloads images in the folder. If there are any to download.
 	 * @param folder
 	 * @param id
 	 */
@@ -190,12 +198,16 @@ public class Main extends Thread {
 				else if(f.getName().toLowerCase().endsWith("flac")){
 					parser = new FlacParser();
 				}
+				else if(f.getName().toLowerCase().endsWith("wav")){
+					parser = new AudioParser();
+				}
 				else{
 					parser = new MP4Parser(); //works with m4a
 				}
 				ParseContext parseCtx = new ParseContext();
 				parser.parse(binput, handler, metadata, parseCtx);
 				input.close();
+
 				/**
 		        // List all metadata
 		        String[] metadataNames = metadata.names();
@@ -204,12 +216,19 @@ public class Main extends Thread {
 		        System.out.println(name + ": " + metadata.get(name));
 		        }
 				 */
-				String artist = metadata.get("xmpDM:artist");
+				String artist; 
+				artist = metadata.get("xmpDM:artist");
+				if(artist == null)
+					artist = metadata.get("albumartist");
 				String artarg = "artist=" + artist;
 				String track = "track=" + metadata.get("dc:title");
+				//System.out.println(track);
+				if(track.equals("track=null")){
+					track = "track=" + trackFromFileName(f.getName());
+				}
 				//System.out.println(artarg);
 				try{
-					if(!art && !artist.equals(lastart)) //if we couldn't find art for the artist last time, we won't be able to this time either. Check if next track is of a different artist instead!
+					if(artist!=null && !art && !artist.equals(lastart)) //if we couldn't find art for the artist last time, we won't be able to this time either. Check if next track is of a different artist instead!
 					{
 						lastart = artist;
 						art = getArtistArt(artist, artarg, track, folder, f);
@@ -235,6 +254,19 @@ public class Main extends Thread {
 	}
 
 	/**
+	 * Tries to get track name from name of file.
+	 * Not all tracks are aptly named, but this should give us a few more matches.
+	 * @param name
+	 * @return
+	 */
+	private String trackFromFileName(String name) {
+		name = name.replaceFirst("(*[0-9]+)*\\.* *", ""); //try to remove track number indicators from file names.
+		name = name.replaceFirst("(\\.mp3)|(\\.flac)|(\\.wav)|(\\.m4a)", "");
+		System.out.println(name);
+		return name;
+	}
+
+	/**
 	 * Downloads and saves album art if album art is found on last.fm. First checks if art can be found by getting the track's info(based on name and artist). 
 	 * If that fails, tries to download art by using the tagged album name.
 	 * @param artist
@@ -253,7 +285,7 @@ public class Main extends Thread {
 		File pic = new File(f.getParent() + "/cover.png");
 		Image res = null;
 		try{
-		res = getImage("track.getInfo",track, artarg, autocorrect);
+			res = getImage("track.getInfo",track, artarg, autocorrect);
 		}
 		catch(Exception e){}
 		if(res!=null){
