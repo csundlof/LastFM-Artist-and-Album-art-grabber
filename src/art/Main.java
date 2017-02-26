@@ -299,7 +299,10 @@ public class Main extends Thread {
 		{
 			if(!album.equals(lastalbum))
 			{
+				try{
 				res = getImage("album.getInfo",artarg, album, autocorrect);
+				}
+				catch(Exception e){}
 				if(res!=null){
 					ImageIO.write((RenderedImage) res, "png", pic);
 					albumLock.lock();
@@ -344,22 +347,17 @@ public class Main extends Thread {
 				res = getImage("artist.getInfo",artarg, autocorrect);
 			}
 			catch(Exception e){ 
-				artarg = "artist=";
-				try{
-					artarg +=  getArtist(track);
-				}
-				catch(Exception ee)
-				{
-				}
-				finally{
-					if(artarg.equals("artist="))
-					{
-						addProblematic(folder);
-						return false;
-					}
-				}
+			}
+			try{
+			if(res == null && (artarg.matches(".+(feat|ft)\\.*.+") || artarg.matches(".+\\(\\?+\\)") || artarg.matches(".+&.*"))) // if we can't find artist, try to scrub data..
+			{
+				artarg = artarg.replaceFirst(" *(feat|ft)\\.*.+", "");
+				artarg = artarg.replaceFirst(" *\\(\\?+\\)", "");
+				artarg = artarg.replaceFirst(" *&.*", "");
 				res = getImage("artist.getInfo",artarg, autocorrect);
 			}
+			}
+			catch(Exception e){}
 			if(res!=null){
 				ImageIO.write((RenderedImage) res, "png", pic);
 				artistListLock.lock();
@@ -376,36 +374,6 @@ public class Main extends Thread {
 			}
 		}
 		return art;
-	}
-
-	/**
-	 * Returns artist for a track. If one is associated with the track on last.fm.
-	 * @param track
-	 * @return
-	 * @throws Exception
-	 */
-	private String getArtist(String track) throws Exception {
-		StringBuilder urlToRead = new StringBuilder();
-		urlToRead.append(host);
-		urlToRead.append("?");
-		urlToRead.append("method=track.getinfo");
-		urlToRead.append(API_STRING);
-		urlToRead.append("&");
-		urlToRead.append(track);
-		//System.out.println(urlToRead);
-		URL url = new URL(urlToRead.toString());
-		HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-		conn.setRequestMethod("GET");
-		BufferedReader rd = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
-		String line;
-		while ((line = rd.readLine()) != null) { //get name of artist, if one exists.
-			if(line.startsWith("<artist>"))
-			{
-				line = rd.readLine();
-				return line.substring(6, (line.length()-7));
-			}
-		}
-		return "";
 	}
 
 	/**
@@ -430,6 +398,7 @@ public class Main extends Thread {
 	 * @throws Exception
 	 */
 	public static Image getImage(String method, String... params) throws Exception {
+		try{
 		//StringBuilder result = new StringBuilder();
 		StringBuilder urlToRead = new StringBuilder();
 		urlToRead.append(host);
@@ -441,8 +410,8 @@ public class Main extends Thread {
 			urlToRead.append("&");
 			urlToRead.append(param);
 		}
-		//System.out.println(urlToRead);
-		URL url = new URL(urlToRead.toString());
+		//System.out.println(urlToRead);		
+		URL url = new URL(urlToRead.toString().replaceAll(" ", "%20"));
 		HttpURLConnection conn = (HttpURLConnection) url.openConnection();
 		conn.setRequestMethod("GET");
 		BufferedReader rd = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
@@ -471,5 +440,9 @@ public class Main extends Thread {
 		}
 		catch(Exception e){}
 		return image;
+	}catch(Exception e){//e.printStackTrace();
+	return null;
 	}
+	}
+		
 }
