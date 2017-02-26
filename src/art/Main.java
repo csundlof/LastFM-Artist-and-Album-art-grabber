@@ -220,11 +220,11 @@ public class Main extends Thread {
 				artist = metadata.get("xmpDM:artist");
 				if(artist == null)
 					artist = metadata.get("albumartist");
-				String artarg = "artist=" + artist;
 				String track = "track=" + metadata.get("dc:title");
+				track = track.trim();
 				//System.out.println(track);
-				if(track.equals("track=null")){
-					track = "track=" + trackFromFileName(f.getName());
+				if(track.matches("track=(null)?")){
+					track = "track=" + trackFromFileName(f.getName()); // try to get track name from file name if there's no tag.
 				}
 				//System.out.println(artarg);
 				try{
@@ -236,7 +236,7 @@ public class Main extends Thread {
 					if(!alb)
 					{
 						String album = "album=" + metadata.get("xmpDM:album");
-						alb = getAlbumArt(artist, artarg, folder, f, album, lastalbum, track);
+						alb = getAlbumArt(artarg, folder, f, album, lastalbum, track);
 						lastalbum = album;
 					}
 				}
@@ -260,16 +260,15 @@ public class Main extends Thread {
 	 * @return
 	 */
 	private String trackFromFileName(String name) {
-		name = name.replaceFirst("(*[0-9]+)*\\.* *", ""); //try to remove track number indicators from file names.
+		name = name.replaceFirst("\\(?[0-9]+\\)?\\.? +.+", ""); //try to remove track number indicators from file names.
 		name = name.replaceFirst("(\\.mp3)|(\\.flac)|(\\.wav)|(\\.m4a)", "");
-		System.out.println(name);
+		//System.out.println(name);
 		return name;
 	}
 
 	/**
 	 * Downloads and saves album art if album art is found on last.fm. First checks if art can be found by getting the track's info(based on name and artist). 
 	 * If that fails, tries to download art by using the tagged album name.
-	 * @param artist
 	 * @param artarg
 	 * @param autocorrect
 	 * @param folder
@@ -279,15 +278,33 @@ public class Main extends Thread {
 	 * @param track
 	 * @return
 	 */
-	private boolean getAlbumArt(String artist, String artarg, File folder, File f, String album, String lastalbum, String track) throws Exception
+	private boolean getAlbumArt(String artarg, File folder, File f, String album, String lastalbum, String track) throws Exception
 	{
 		boolean alb = false;
 		File pic = new File(f.getParent() + "/cover.png");
 		Image res = null;
+		String artarg2;
 		try{
-			res = getImage("track.getInfo",track, artarg, autocorrect);
+		artarg2 = "artist=" + getArtist(track, artarg);
+		}
+		catch(Exception e){artarg2 = artarg;
+		//e.printStackTrace();
+		}
+		try{
+			res = getImage("track.getInfo",track, artarg2, autocorrect);
 		}
 		catch(Exception e){}
+		if(res == null && (artarg.matches("(.+(feat|ft)\\.*.+)|(.+\\(\\?+\\))|(.+&.*)") || track.matches("(.+\\(\\?+\\))"))) // if we can't find album, try to scrub data.
+		{
+			artarg = artarg2.replaceFirst(" *(feat|ft)\\.*.+", "");
+			artarg = artarg.replaceFirst(" *\\(\\?+\\)", ""); // more aggressive version: " *\\(.+\\)", will match on everything in parentheses.
+			artarg = artarg.replaceFirst(" *&.*", "");
+			track = track.replaceFirst(" *\\(\\?+\\)", "");
+			try{
+				res = getImage("track.getInfo",track, artarg, autocorrect);
+			}
+			catch(Exception e){}
+		}
 		if(res!=null){
 			ImageIO.write((RenderedImage) res, "png", pic);
 			albumLock.lock();
@@ -300,7 +317,7 @@ public class Main extends Thread {
 			if(!album.equals(lastalbum))
 			{
 				try{
-				res = getImage("album.getInfo",artarg, album, autocorrect);
+				res = getImage("album.getInfo",artarg2, album, autocorrect);
 				}
 				catch(Exception e){}
 				if(res!=null){
@@ -317,6 +334,40 @@ public class Main extends Thread {
 		}
 		return alb;
 
+	}
+
+	/**
+	 * Returns artist for a track. If one is associated with the track on last.fm.
+	 * @param track
+	 * @return
+	 * @throws Exception
+	 */
+	private String getArtist(String track, String artist) throws Exception {
+		StringBuilder urlToRead = new StringBuilder();
+		urlToRead.append(host);
+		urlToRead.append("?");
+		urlToRead.append("method=track.getinfo");
+		urlToRead.append(API_STRING);
+		urlToRead.append("&");
+		urlToRead.append(track);
+		urlToRead.append("&");
+		urlToRead.append(artist);
+		//System.out.println(urlToRead);
+		URL url = new URL(urlToRead.toString().replaceAll(" ", "%20"));
+		HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+		conn.setRequestMethod("GET");
+		BufferedReader rd = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
+		String line;
+		while ((line = rd.readLine()) != null) { //get name of artist, if one exists.
+			if(line.startsWith("<artist>"))
+			{
+				//line = rd.readLine();
+				//System.out.println(line);
+				//System.out.println(line.substring(14, (line.length()-7)));
+				return line.substring(14, (line.length()-7));
+			}
+		}
+		return "";
 	}
 
 	/**
@@ -347,17 +398,18 @@ public class Main extends Thread {
 				res = getImage("artist.getInfo",artarg, autocorrect);
 			}
 			catch(Exception e){ 
+			//	e.printStackTrace();
 			}
-			try{
-			if(res == null && (artarg.matches(".+(feat|ft)\\.*.+") || artarg.matches(".+\\(\\?+\\)") || artarg.matches(".+&.*"))) // if we can't find artist, try to scrub data..
+			if(res == null && (artarg.matches(".+(feat|ft)\\.*.+") || artarg.matches(".+\\(\\?+\\)") || artarg.matches(".+&.*"))) // if we can't find artist, try to scrub data.
 			{
 				artarg = artarg.replaceFirst(" *(feat|ft)\\.*.+", "");
 				artarg = artarg.replaceFirst(" *\\(\\?+\\)", "");
 				artarg = artarg.replaceFirst(" *&.*", "");
+				try{
 				res = getImage("artist.getInfo",artarg, autocorrect);
+				}
+				catch(Exception e){}
 			}
-			}
-			catch(Exception e){}
 			if(res!=null){
 				ImageIO.write((RenderedImage) res, "png", pic);
 				artistListLock.lock();
@@ -398,7 +450,6 @@ public class Main extends Thread {
 	 * @throws Exception
 	 */
 	public static Image getImage(String method, String... params) throws Exception {
-		try{
 		//StringBuilder result = new StringBuilder();
 		StringBuilder urlToRead = new StringBuilder();
 		urlToRead.append(host);
@@ -408,12 +459,22 @@ public class Main extends Thread {
 		for(String param : params)
 		{
 			urlToRead.append("&");
+			if(param.matches(".+=(null)?")) //empty param
+				return null;
 			urlToRead.append(param);
 		}
 		//System.out.println(urlToRead);		
 		URL url = new URL(urlToRead.toString().replaceAll(" ", "%20"));
 		HttpURLConnection conn = (HttpURLConnection) url.openConnection();
 		conn.setRequestMethod("GET");
+		try{
+		if(conn.getInputStream()==null)
+		{
+			//System.out.println(url);
+			return null;
+		}
+		}catch(Exception e){//System.out.println(url); 
+		return null;}
 		BufferedReader rd = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
 		String line;
 		String imgUrl = "";
@@ -440,9 +501,6 @@ public class Main extends Thread {
 		}
 		catch(Exception e){}
 		return image;
-	}catch(Exception e){//e.printStackTrace();
-	return null;
-	}
 	}
 		
 }
